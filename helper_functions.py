@@ -1,6 +1,7 @@
+from collections import defaultdict
 from numpy import matmul, diagflat, dot, conj, real
 from numpy.linalg import eig, inv
-from sympy import Matrix, Symbol, symbols, zeros, ImmutableDenseMatrix, rot_axis1,rot_ccw_axis2,rot_axis3, I, diag, eye, shape
+from sympy import Matrix, Symbol, symbols, zeros, ImmutableDenseMatrix, rot_axis1,rot_ccw_axis2,rot_axis3, I, diag, eye, shape, lambdify
 from sympy import E as Exp
 from sympy.physics.quantum.dagger import Dagger
 from scipy.linalg import expm
@@ -12,36 +13,24 @@ from scipy.linalg import expm
 #Returns:
 #PMNS matrix for 2x2, 3x3, or 4x4 case, depending on size
 #https://en.wikipedia.org/wiki/Pontecorvo%E2%80%93Maki%E2%80%93Nakagawa%E2%80%93Sakata_matrix
-def pmns_matrix(size: int,symbol_dict:dict) -> Matrix:
-
-    U = zeros(size,size)
-    if size == 2:
-        U = (ImmutableDenseMatrix(rot_axis3(symbol_dict['theta_12'])).col_del(2).row_del(2))
+def pmns_matrix(symbol_dict:dict) -> Matrix:
     
-    elif size == 3:
-        
-        complex_rot = rot_ccw_axis2(symbol_dict['theta_13'])
-        complex_rot[0,2] *= Exp**(-I*symbol_dict['delta_13'])
-        complex_rot[2,0] *= Exp**(I*symbol_dict['delta_13'])
-        U = rot_axis1(symbol_dict['theta_23'])*complex_rot*rot_axis3(symbol_dict['theta_12'])
-    else:
-        
-        R23 = rot_axis1(symbol_dict['theta_23']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
-        R12 = rot_axis3(symbol_dict['theta_12']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
-        R13 = rot_ccw_axis2(symbol_dict['theta_13']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
-        R13[2,0] *= Exp**(I*symbol_dict['delta_13'])
-        R13[0,2] *= Exp**(-I*symbol_dict['delta_13'])
+    R23 = rot_axis1(symbol_dict['theta_23']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
+    R12 = rot_axis3(symbol_dict['theta_12']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
+    R13 = rot_ccw_axis2(symbol_dict['theta_13']).row_insert(3,zeros(1,3)).col_insert(3,Matrix([0,0,0,1]))
+    R13[2,0] *= Exp**(I*symbol_dict['delta_13'])
+    R13[0,2] *= Exp**(-I*symbol_dict['delta_13'])
 
-        R34 = rot_axis1(symbol_dict['theta_34']).row_insert(0,zeros(1,3)).col_insert(0,Matrix([1,0,0,0]))
-        R24 = rot_axis1(symbol_dict['theta_24']).row_insert(2,zeros(1,3)).col_insert(2,Matrix([0,0,1,0]))
-        R24[1,3] *= Exp**(-I*symbol_dict['delta_24'])
-        R24[3,1] *= Exp**(I*symbol_dict['delta_24'])
+    R34 = rot_axis1(symbol_dict['theta_34']).row_insert(0,zeros(1,3)).col_insert(0,Matrix([1,0,0,0]))
+    R24 = rot_axis1(symbol_dict['theta_24']).row_insert(2,zeros(1,3)).col_insert(2,Matrix([0,0,1,0]))
+    R24[1,3] *= Exp**(-I*symbol_dict['delta_24'])
+    R24[3,1] *= Exp**(I*symbol_dict['delta_24'])
 
-        R14 = rot_ccw_axis2(symbol_dict['theta_14']).row_insert(2,zeros(1,3)).col_insert(2,Matrix([0,0,1,0]))
-        R14[3,0] *= Exp**(-I*symbol_dict['delta_14'])
-        R14[0,3] *= Exp**(I*symbol_dict['delta_14'])
+    R14 = rot_ccw_axis2(symbol_dict['theta_14']).row_insert(2,zeros(1,3)).col_insert(2,Matrix([0,0,1,0]))
+    R14[3,0] *= Exp**(-I*symbol_dict['delta_14'])
+    R14[0,3] *= Exp**(I*symbol_dict['delta_14'])
 
-        U = R34*R24*R14*R23*R13*R12
+    U = R34*R24*R14*R23*R13*R12
         
     return U
 
@@ -51,16 +40,29 @@ def pmns_matrix(size: int,symbol_dict:dict) -> Matrix:
 #symbols: dictionary containing symbols for theta angles, phase angles, neutrino masses, energy, and potential
 #Returns:
 #Hamiltonian for mixing matrix U and potential V
-def hamiltonian(U:Matrix,V:Matrix,symbols:dict) -> Matrix:
+def make_hamiltonian(size:int,sterile_potential:bool) -> Matrix:
+    symbols = make_symbols()
+    constants = get_constants(size,symbols)
+    U = pmns_matrix(symbols)
+    A = symbols['A']
+    E = symbols['Energy']
     
     M = diag(0,*symbols['deltas'][0:shape(U)[0]-1])
-    M *= 1/(2*symbols['Energy'])
+    M *= 1/(2*E)
     H = (U*M*Dagger(U))
+
+    if sterile_potential:
+        V = Matrix([[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,A]]) #4x4 case with potential only affecting sterile neutrino
+    else:
+        V = Matrix([[A,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]]) #Potential applied to the electon neutrino, and 0 potential for the other flavors
+    
     H = H-eye(shape(U)[0])*H[0,0] + V
 
     #Correction for units
     H *= 5
-    
+
+    #Subs symbolic variables and lambdifies the hamiltonian for fast calculations
+    H = lambdify([E,A],H.subs(constants))
     return H
 
 #Params
@@ -95,11 +97,11 @@ def move_nu(lam_H:callable,energy_value:float,potential_value:float,step_size:fl
 #nu_I: The initial neutrino state
 #Returns:
 #Real(P2) probability of nu_I beind detected as nu_F at distance > L
-def calculate_probability(lam_H:callable,energy_value:float,potential_value:list,step_size:float,nu_I:list,nu_F:list,steps:int) -> float:
+def calculate_probability(lam_H:callable,energy_value:float,potential_values:list,step_size:float,nu_I:list,nu_F:list,steps:int) -> float:
     i = 0
     nu_L = nu_I
     while i < steps:
-        nu_L = move_nu(lam_H,energy_value,potential_value[i],step_size,nu_L)
+        nu_L = move_nu(lam_H,energy_value,potential_values[i],step_size,nu_L)
         i+=1
     P = dot(nu_L,nu_F)
     Pconj = conj(P)
@@ -110,7 +112,7 @@ def calculate_probability(lam_H:callable,energy_value:float,potential_value:list
 #Symbolic Variables
 #Params:
 #None
-def make_symbols():
+def make_symbols() -> dict:
 
     symbol_dict = {}
     symbol_dict['A'] = Symbol(r"A",real = True,positive = True) #Potential
@@ -128,7 +130,6 @@ def make_symbols():
                                                                real = True, positive = True) #Mixing angles for 3x3 rotation matrix
     thetas = [theta12,theta23,theta13,theta14,theta24,theta34]
     symbol_dict['thetas'] = thetas
-
     
     for theta in thetas:
         symbol_dict[str(theta).lstrip('\\').replace('{','').replace('}','')] = theta
@@ -140,19 +141,35 @@ def make_symbols():
 
 #Neutrino mixing angles and masses
 #Current estimations can be found on nuFit: http://www.nu-fit.org/?q=node/8
-def get_constants(symbols): #Hardcoded values since they're constant/can change if nufit publishes new data
+def get_constants(flavors:int,symbols:dict) -> dict: #Hardcoded values since they're constant/can change if nufit publishes new data
     constants = {}
     constants[symbols['theta_12']] = 0.588
-    constants[symbols['theta_13']] = 0.149
-    constants[symbols['theta_23']] = 0.847
-    constants[symbols['theta_14']] = 0.193
-    constants[symbols['theta_24']] = 2.99
-    constants[symbols['theta_34']] = 2.94
-    constants[symbols['delta_14']] = 0.893
-    constants[symbols['delta_13']] = 3.09
-    constants[symbols['delta_24']] = 1.94
     constants[symbols['Delta_21']] = 8*10**(-5)
-    constants[symbols['Delta_31']] = 2*10**(-3)
-    constants[symbols['Delta_41']] = 1*10**(-2)
+
+    if flavors > 2:
+        constants[symbols['theta_13']] = 0.149
+        constants[symbols['theta_23']] = 0.847
+        constants[symbols['delta_13']] = 3.09
+        constants[symbols['Delta_31']] = 2*10**(-3)
+    else:
+        constants[symbols['theta_13']] = 0
+        constants[symbols['theta_23']] = 0
+        constants[symbols['delta_13']] = 0
+        constants[symbols['Delta_31']] = 0
+    if flavors > 3:
+    
+        constants[symbols['theta_14']] = 0.193
+        constants[symbols['theta_24']] = 2.99
+        constants[symbols['theta_34']] = 2.94
+        constants[symbols['delta_14']] = 0.893
+        constants[symbols['delta_24']] = 1.94
+        constants[symbols['Delta_41']] = 1*10**(-2)
+    else:
+        constants[symbols['theta_14']] = 0
+        constants[symbols['theta_24']] = 0
+        constants[symbols['theta_34']] = 0
+        constants[symbols['delta_14']] = 0
+        constants[symbols['delta_24']] = 0
+        constants[symbols['Delta_41']] = 0
 
     return constants
